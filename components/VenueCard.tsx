@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/card"
 import Image from "next/image"
 import { Star, Clock, MapPin } from "lucide-react"
+import { useEffect, useState } from "react"
 
 type Photo = {
   id: string
@@ -18,6 +19,13 @@ type Photo = {
   height?: number | null
   url?: string | null
   mainPhoto: boolean
+  urls?: {
+    original: string | null
+    thumbnail: string | null
+    small: string | null
+    medium: string | null
+    large: string | null
+  }
 }
 
 type DealInfo = {
@@ -53,44 +61,92 @@ type Props = {
 }
 
 export default function VenueCard({ business }: Props) {
-  // Get main photo or first available photo
-  const displayPhoto = React.useMemo(() => {
-    const mainPhoto = business.photos ? business.photos.find(p => p.mainPhoto) : null
-    return mainPhoto?.url || '/placeholder-image.jpg'
-  }, [business.photos])
+  // Define more specific types for mainPhoto to include urls
+  const [mainPhoto, setMainPhoto] = useState<(Photo & {
+    urls?: {
+      original: string | null;
+      thumbnail: string | null;
+      small: string | null;
+      medium: string | null;
+      large: string | null;
+    };
+  }) | null>(null);
+  const [isImageLoading, setIsImageLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    const fetchPhotos = async () => {
+      try {
+        const response = await fetch(`/api/business/${business.id}/photos`);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch photos: ${response.status}`);
+        }
+
+        // Use a more specific type for the response
+        const photos: Array<Photo & {
+          urls?: {
+            original: string | null;
+            thumbnail: string | null;
+            small: string | null;
+            medium: string | null;
+            large: string | null;
+          };
+        }> = await response.json();
+
+        const main = photos.find((p) => p.mainPhoto) || photos[0] || null;
+        setMainPhoto(main);
+      } catch (error) {
+        console.error('Error fetching photos:', error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsImageLoading(false);
+      }
+    };
+
+    if (business?.id) {
+      fetchPhotos();
+    } else {
+      setIsImageLoading(false);
+    }
+  }, [business?.id]); // Use optional chaining to prevent errors
+
+  // Get image source with fallback
+  const getImageSrc = (size: 'thumbnail' | 'small' | 'medium' | 'large' | 'original') => {
+    if (mainPhoto?.urls?.[size]) {
+      return mainPhoto.urls[size];
+    }
+    return '/placeholder-image.jpg';
+  };
 
   // Format price level
   const priceLevel = React.useMemo(() => {
-    return business.priceLevel ? '$'.repeat(business.priceLevel) : null
-  }, [business.priceLevel])
+    return business.priceLevel ? '$'.repeat(business.priceLevel) : null;
+  }, [business.priceLevel]);
 
   // Get today's deals
   const todayDeals = React.useMemo(() => {
-    const today = new Date().getDay()
+    const today = new Date().getDay();
     if (business.dealInfo) {
       return business.dealInfo
         .filter(deal => deal.dayOfWeek === today)
-        .sort((a, b) => a.startTime.localeCompare(b.startTime))
-    } else {
-      return []
+        .sort((a, b) => a.startTime.localeCompare(b.startTime));
     }
-  }, [business.dealInfo])
+    return [];
+  }, [business.dealInfo]);
 
   // Format time to 12-hour format
   const formatTime = (time: string) => {
-    const [hours, minutes] = time.split(':')
-    const hour = parseInt(hours)
-    const ampm = hour >= 12 ? 'PM' : 'AM'
-    const hour12 = hour % 12 || 12
-    return `${hour12}${minutes ? `:${minutes}` : ''} ${ampm}`
-  }
+    const [hours, minutes] = time.split(':');
+    const hour = parseInt(hours);
+    const ampm = hour >= 12 ? 'PM' : 'AM';
+    const hour12 = hour % 12 || 12;
+    return `${hour12}${minutes ? `:${minutes}` : ''} ${ampm}`;
+  };
 
   // Format deals for display
   const formatDeals = (deals: string[]) => {
-    if (deals.length === 0) return null
-    if (deals.length === 1) return deals[0]
-    return deals.join(' • ')
-  }
+    if (deals.length === 0) return null;
+    if (deals.length === 1) return deals[0];
+    return deals.join(' • ');
+  };
 
   return (
     <Card className="w-full max-w-sm mx-auto hover:shadow-lg transition-shadow duration-200 border-[#E8F3E8] hover:border-[#9DC7AC] bg-white">
@@ -129,13 +185,16 @@ export default function VenueCard({ business }: Props) {
 
       <CardContent className="p-0">
         <div className="relative w-full aspect-video">
-          <Image
-            src={displayPhoto}
-            alt={business.name}
-            fill
-            className="object-cover"
-            sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
-          />
+          {!isImageLoading && (
+            <Image
+              src={getImageSrc('medium')}
+              alt={business.name}
+              fill
+              className="object-cover"
+              sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+              quality={75}
+            />
+          )}
         </div>
       </CardContent>
 
@@ -160,5 +219,5 @@ export default function VenueCard({ business }: Props) {
         </div>
       </CardFooter>
     </Card>
-  )
+  );
 }

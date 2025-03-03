@@ -22,6 +22,19 @@ const nextConfig: NextConfig = {
         protocol: 'https',
         hostname: 'images.pexels.com',
         pathname: '/**',
+      },
+      {
+        protocol: 'https',
+        hostname: (process.env.AWS_S3_BUCKET_NAME || 'localhost').replace('.s3.amazonaws.com', ''),
+        pathname: '/**',
+      }
+    ]
+  },
+  async rewrites() {
+    return [
+      {
+        source: '/api/:path*',
+        destination: 'http://localhost:3001/api/:path*' // Adjust port if your backend runs on a different port
       }
     ]
   }
