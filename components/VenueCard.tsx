@@ -19,12 +19,21 @@ type Photo = {
   height?: number | null
   url?: string | null
   mainPhoto: boolean
-  urls?: {
-    original: string | null
-    thumbnail: string | null
-    small: string | null
-    medium: string | null
-    large: string | null
+
+  // S3 storage keys for different variants
+  s3Key?: string | null
+  s3KeyThumbnail?: string | null
+  s3KeySmall?: string | null
+  s3KeyMedium?: string | null
+  s3KeyLarge?: string | null
+
+  // CDN URLs (generated client-side for better performance)
+  cdnUrls?: {
+    original?: string
+    thumbnail?: string
+    small?: string
+    medium?: string
+    large?: string
   }
 }
 
@@ -60,60 +69,105 @@ type Props = {
   business: Business
 }
 
+// CDN URL generation function
+const generateCDNUrl = (s3Key: string | null | undefined): string | null => {
+  if (!s3Key) return null;
+
+  const cdnBaseUrl = process.env.NEXT_PUBLIC_CLOUDFLARE_CDN_BASE_URL;
+  if (!cdnBaseUrl) {
+    console.warn('NEXT_PUBLIC_CLOUDFLARE_CDN_BASE_URL not configured');
+    return null;
+  }
+
+  // Remove any leading slashes from s3Key and construct CDN URL
+  const cleanKey = s3Key.replace(/^\/+/, '');
+  return `${cdnBaseUrl}/${cleanKey}`;
+};
+
+// Fallback to API URL generation (only used when CDN fails)
+const generateAPIUrl = async (s3Key: string): Promise<string | null> => {
+  try {
+    const response = await fetch(`/api/images/${encodeURIComponent(s3Key)}/url`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch URL: ${response.status}`);
+    }
+    const data = await response.json();
+    return data.url;
+  } catch (error) {
+    console.error('Error fetching signed URL:', error);
+    return null;
+  }
+};
+
 export default function VenueCard({ business }: Props) {
-  // Define more specific types for mainPhoto to include urls
-  const [mainPhoto, setMainPhoto] = useState<(Photo & {
-    urls?: {
-      original: string | null;
-      thumbnail: string | null;
-      small: string | null;
-      medium: string | null;
-      large: string | null;
-    };
-  }) | null>(null);
+  const [mainPhoto, setMainPhoto] = useState<Photo | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [isImageLoading, setIsImageLoading] = useState<boolean>(true);
+  const [imageError, setImageError] = useState<boolean>(false);
 
   useEffect(() => {
-    const fetchPhotos = async () => {
-      try {
-        const response = await fetch(`/api/business/${business.id}/photos`);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch photos: ${response.status}`);
-        }
-
-        // Use a more specific type for the response
-        const photos: Array<Photo & {
-          urls?: {
-            original: string | null;
-            thumbnail: string | null;
-            small: string | null;
-            medium: string | null;
-            large: string | null;
-          };
-        }> = await response.json();
-
-        const main = photos.find((p) => p.mainPhoto) || photos[0] || null;
-        setMainPhoto(main);
-      } catch (error) {
-        console.error('Error fetching photos:', error instanceof Error ? error.message : String(error));
-      } finally {
+    const loadMainPhoto = async () => {
+      if (!business?.photos || business.photos.length === 0) {
         setIsImageLoading(false);
+        return;
       }
+
+      // Find main photo or use first available
+      const main = business.photos.find((p) => p.mainPhoto) || business.photos[0];
+      setMainPhoto(main);
+
+      // Try to get CDN URL for medium variant first, then fallback to other variants
+      const variants = ['s3KeyMedium', 's3KeySmall', 's3KeyLarge', 's3Key'] as const;
+      let url: string | null = null;
+
+      for (const variant of variants) {
+        const s3Key = main[variant];
+        if (s3Key) {
+          url = generateCDNUrl(s3Key);
+          if (url) {
+            break;
+          }
+        }
+      }
+
+      // If CDN URL generation failed, try API fallback (only for the first variant)
+      if (!url && main.s3KeyMedium) {
+        console.warn('CDN URL generation failed, falling back to API');
+        url = await generateAPIUrl(main.s3KeyMedium);
+      }
+
+      // Final fallback to external URL if it exists
+      if (!url && main.url) {
+        url = main.url;
+      }
+
+      setImageUrl(url);
+      setIsImageLoading(false);
     };
 
-    if (business?.id) {
-      fetchPhotos();
-    } else {
-      setIsImageLoading(false);
-    }
-  }, [business?.id]); // Use optional chaining to prevent errors
+    loadMainPhoto();
+  }, [business?.id, business?.photos]);
 
-  // Get image source with fallback
-  const getImageSrc = (size: 'thumbnail' | 'small' | 'medium' | 'large' | 'original') => {
-    if (mainPhoto?.urls?.[size]) {
-      return mainPhoto.urls[size];
+  // Handle image load error
+  const handleImageError = () => {
+    setImageError(true);
+    // Try fallback to API URL if CDN fails
+    if (mainPhoto?.s3KeyMedium) {
+      generateAPIUrl(mainPhoto.s3KeyMedium).then(fallbackUrl => {
+        if (fallbackUrl && fallbackUrl !== imageUrl) {
+          setImageUrl(fallbackUrl);
+          setImageError(false);
+        }
+      });
     }
-    return '/placeholder-image.jpg';
+  };
+
+  // Get image source with comprehensive fallback logic
+  const getImageSrc = (): string => {
+    if (imageError || !imageUrl) {
+      return '/placeholder-image.jpg';
+    }
+    return imageUrl;
   };
 
   // Format price level
@@ -184,16 +238,24 @@ export default function VenueCard({ business }: Props) {
       </CardHeader>
 
       <CardContent className="p-0">
-        <div className="relative w-full aspect-video">
+        <div className="relative w-full aspect-video bg-gray-100">
           {!isImageLoading && (
             <Image
-              src={getImageSrc('medium')}
+              src={getImageSrc()}
               alt={business.name}
               fill
               className="object-cover"
               sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
               quality={75}
+              onError={handleImageError}
+              placeholder="blur"
+              blurDataURL="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k="
             />
+          )}
+          {isImageLoading && (
+            <div className="absolute inset-0 bg-gray-200 animate-pulse flex items-center justify-center">
+              <div className="text-gray-400 text-sm">Loading...</div>
+            </div>
           )}
         </div>
       </CardContent>
