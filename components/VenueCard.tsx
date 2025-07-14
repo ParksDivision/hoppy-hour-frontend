@@ -27,14 +27,17 @@ type Photo = {
   s3KeyMedium?: string | null
   s3KeyLarge?: string | null
 
-  // CDN URLs (generated client-side for better performance)
+  // CDN URLs (generated server-side)
   cdnUrls?: {
-    original?: string
-    thumbnail?: string
-    small?: string
-    medium?: string
-    large?: string
+    original?: string | null
+    thumbnail?: string | null
+    small?: string | null
+    medium?: string | null
+    large?: string | null
   }
+
+  // Fallback URL
+  fallbackUrl?: string | null
 }
 
 type DealInfo = {
@@ -69,36 +72,6 @@ type Props = {
   business: Business
 }
 
-// CDN URL generation function
-const generateCDNUrl = (s3Key: string | null | undefined): string | null => {
-  if (!s3Key) return null;
-
-  const cdnBaseUrl = process.env.NEXT_PUBLIC_CLOUDFLARE_CDN_BASE_URL;
-  if (!cdnBaseUrl) {
-    console.warn('NEXT_PUBLIC_CLOUDFLARE_CDN_BASE_URL not configured');
-    return null;
-  }
-
-  // Remove any leading slashes from s3Key and construct CDN URL
-  const cleanKey = s3Key.replace(/^\/+/, '');
-  return `${cdnBaseUrl}/${cleanKey}`;
-};
-
-// Fallback to API URL generation (only used when CDN fails)
-const generateAPIUrl = async (s3Key: string): Promise<string | null> => {
-  try {
-    const response = await fetch(`/api/images/${encodeURIComponent(s3Key)}/url`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch URL: ${response.status}`);
-    }
-    const data = await response.json();
-    return data.url;
-  } catch (error) {
-    console.error('Error fetching signed URL:', error);
-    return null;
-  }
-};
-
 export default function VenueCard({ business }: Props) {
   const [mainPhoto, setMainPhoto] = useState<Photo | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -116,49 +89,68 @@ export default function VenueCard({ business }: Props) {
       const main = business.photos.find((p) => p.mainPhoto) || business.photos[0];
       setMainPhoto(main);
 
-      // Try to get CDN URL for medium variant first, then fallback to other variants
-      const variants = ['s3KeyMedium', 's3KeySmall', 's3KeyLarge', 's3Key'] as const;
-      let url: string | null = null;
+      // Priority order for image URLs (CDN first, then fallbacks)
+      let selectedUrl: string | null = null;
 
-      for (const variant of variants) {
-        const s3Key = main[variant];
-        if (s3Key) {
-          url = generateCDNUrl(s3Key);
-          if (url) {
-            break;
-          }
-        }
+      // 1. Try CDN URLs (medium -> small -> thumbnail -> large -> original)
+      if (main.cdnUrls) {
+        const cdnOptions = [
+          main.cdnUrls.medium,
+          main.cdnUrls.small,
+          main.cdnUrls.thumbnail,
+          main.cdnUrls.large,
+          main.cdnUrls.original
+        ];
+
+        selectedUrl = cdnOptions.find(url => url && url.trim() !== '') || null;
       }
 
-      // If CDN URL generation failed, try API fallback (only for the first variant)
-      if (!url && main.s3KeyMedium) {
-        console.warn('CDN URL generation failed, falling back to API');
-        url = await generateAPIUrl(main.s3KeyMedium);
+      // 2. Fallback to external URL if CDN not available
+      if (!selectedUrl && main.fallbackUrl) {
+        selectedUrl = main.fallbackUrl;
       }
 
-      // Final fallback to external URL if it exists
-      if (!url && main.url) {
-        url = main.url;
+      // 3. Final fallback to direct S3 URL construction
+      if (!selectedUrl && main.s3KeyMedium && process.env.NEXT_PUBLIC_CLOUDFLARE_CDN_BASE_URL) {
+        const cleanKey = main.s3KeyMedium.replace(/^\/+/, '');
+        selectedUrl = `${process.env.NEXT_PUBLIC_CLOUDFLARE_CDN_BASE_URL}/${cleanKey}`;
       }
 
-      setImageUrl(url);
+      // 4. Last resort - use original URL
+      if (!selectedUrl && main.url) {
+        selectedUrl = main.url;
+      }
+
+      setImageUrl(selectedUrl);
       setIsImageLoading(false);
     };
 
     loadMainPhoto();
   }, [business?.id, business?.photos]);
 
-  // Handle image load error
+  // Handle image load error - try fallback options
   const handleImageError = () => {
-    setImageError(true);
-    // Try fallback to API URL if CDN fails
-    if (mainPhoto?.s3KeyMedium) {
-      generateAPIUrl(mainPhoto.s3KeyMedium).then(fallbackUrl => {
-        if (fallbackUrl && fallbackUrl !== imageUrl) {
-          setImageUrl(fallbackUrl);
-          setImageError(false);
-        }
-      });
+    if (!mainPhoto) {
+      setImageError(true);
+      return;
+    }
+
+    // Try fallback URLs in order
+    const fallbackOptions = [
+      mainPhoto.fallbackUrl,
+      mainPhoto.url,
+      mainPhoto.cdnUrls?.small,
+      mainPhoto.cdnUrls?.thumbnail
+    ].filter(Boolean);
+
+    const currentIndex = fallbackOptions.findIndex(url => url === imageUrl);
+    const nextUrl = fallbackOptions[currentIndex + 1];
+
+    if (nextUrl) {
+      setImageUrl(nextUrl);
+      setImageError(false);
+    } else {
+      setImageError(true);
     }
   };
 
@@ -188,6 +180,7 @@ export default function VenueCard({ business }: Props) {
 
   // Format time to 12-hour format
   const formatTime = (time: string) => {
+    if (!time) return '';
     const [hours, minutes] = time.split(':');
     const hour = parseInt(hours);
     const ampm = hour >= 12 ? 'PM' : 'AM';
@@ -197,7 +190,7 @@ export default function VenueCard({ business }: Props) {
 
   // Format deals for display
   const formatDeals = (deals: string[]) => {
-    if (deals.length === 0) return null;
+    if (!deals || deals.length === 0) return null;
     if (deals.length === 1) return deals[0];
     return deals.join(' • ');
   };
@@ -242,7 +235,7 @@ export default function VenueCard({ business }: Props) {
           {!isImageLoading && (
             <Image
               src={getImageSrc()}
-              alt={business.name}
+              alt={`${business.name} - Photo`}
               fill
               className="object-cover"
               sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
@@ -250,11 +243,17 @@ export default function VenueCard({ business }: Props) {
               onError={handleImageError}
               placeholder="blur"
               blurDataURL="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k="
+              priority={false}
             />
           )}
           {isImageLoading && (
             <div className="absolute inset-0 bg-gray-200 animate-pulse flex items-center justify-center">
               <div className="text-gray-400 text-sm">Loading...</div>
+            </div>
+          )}
+          {imageError && (
+            <div className="absolute inset-0 bg-gray-100 flex items-center justify-center">
+              <div className="text-gray-400 text-sm">No image available</div>
             </div>
           )}
         </div>
@@ -277,7 +276,7 @@ export default function VenueCard({ business }: Props) {
 
         <div className="w-full flex items-center gap-1 text-[#527C6B] text-sm">
           <MapPin className="w-4 h-4 flex-shrink-0" />
-          <span>{business.address}</span>
+          <span className="line-clamp-2">{business.address}</span>
         </div>
       </CardFooter>
     </Card>
